@@ -228,8 +228,8 @@ class SquashMigrationAutodetector(MigrationAutodetectorBase):
             instance.replaces = migrations
             changes[app_label] = [instance]
 
-    def squash(self, real_loader, squash_loader, ignore_apps=None, migration_name=None):
-        changes_ = self.delete_old_squashed(real_loader, ignore_apps)
+    def squash(self, real_loader, squash_loader, ignore_apps=None, migration_name=None, keep_migrations=False):
+        changes_ = self.delete_old_squashed(real_loader, ignore_apps, keep_migrations)
 
         graph = squash_loader.graph
         changes = super().changes(graph, trim_to_apps=None, convert_apps=None, migration_name=None)
@@ -243,12 +243,15 @@ class SquashMigrationAutodetector(MigrationAutodetectorBase):
         self.replace_current_migrations(real_loader, graph, changes)
         self.add_non_elidables(real_loader, squash_loader, changes)
 
+        if keep_migrations:
+            self.combine_replaces(real_loader, changes)
+
         for app, change in changes_.items():
             changes[app].extend(change)
 
         return changes
 
-    def delete_old_squashed(self, loader, ignore_apps=None):
+    def delete_old_squashed(self, loader, ignore_apps=None, keep_migrations=False):
         changes = defaultdict(set)
         project_path = os.path.abspath(os.curdir)
         project_apps = [app.label for app in apps.get_app_configs()
@@ -262,11 +265,12 @@ class SquashMigrationAutodetector(MigrationAutodetectorBase):
                                for migration in project_migrations if migration.replaces]
 
         migrations_to_remove = set()
-        for migration in (y for x in replaced_migrations for y in x.replaces if y[0] not in ignore_apps or []):
-            real_migration = Migration.from_migration(loader.disk_migrations[migration])
-            real_migration._deleted = True
-            migrations_to_remove.add(migration)
-            changes[migration[0]].add(real_migration)
+        if not keep_migrations:
+            for migration in (y for x in replaced_migrations for y in x.replaces if y[0] not in ignore_apps or []):
+                real_migration = Migration.from_migration(loader.disk_migrations[migration])
+                real_migration._deleted = True
+                migrations_to_remove.add(migration)
+                changes[migration[0]].add(real_migration)
 
         # Remove all the old dependencies that will be removed
         for migration in project_migrations:
@@ -280,8 +284,34 @@ class SquashMigrationAutodetector(MigrationAutodetectorBase):
             setattr(migration, 'dependencies', new_dependencies)
 
         for migration in replaced_migrations:
-            migration._replaces_change = True
+            if not keep_migrations:
+                migration._replaces_change = True
+            else:
+                migration.dependencies = [migration.replaces[-1]]
+                migration.operations = []
+                migration.initial = False
+
             changes[migration.app_label].add(migration)
             setattr(migration, 'replaces', [])
 
         return changes
+
+    def combine_replaces(self, real_loader, changes) -> None:
+        """
+        When using keep_migrations, we replace the older squashed migrations.
+        Since the old ones get replaced by stubs, and the new ones completely replace them,
+        we need to append their replaces clauses to the ones of the new migrations
+        """
+        for migrations in changes.values():
+            # We should only be adding one migration per app in
+            assert len(migrations) == 1
+            new_migration = migrations[0]
+
+            # Prevent accidental recursion
+            original_replaces = new_migration.replaces.copy()
+
+            for node_key in original_replaces:
+                other_migration = real_loader.graph.nodes[node_key]
+                new_migration.replaces.extend(other_migration.replaces)
+
+            new_migration.replaces = sorted(new_migration.replaces)

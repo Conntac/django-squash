@@ -293,6 +293,7 @@ class SquashMigrationTest(MigrationTestBase):
         expected = ['0001_initial.py', '0002_person_age.py', '0003_add_dob.py', '0004_squashed.py', '__init__.py']
         self.assertEqual(files_in_app, expected)
 
+
     def test_simple_delete_squashing_migrations(self):
         class Person(models.Model):
             name = models.CharField(max_length=10)
@@ -321,6 +322,77 @@ class SquashMigrationTest(MigrationTestBase):
         # The new squashed migration replaced the old one now
         self.assertEqual(new_app_squash.Migration.replaces, [('app', '0004_squashed')])
         self.assertEqual(files_in_app, ['0004_squashed.py', '0005_squashed.py', '__init__.py'])
+
+    def test_simple_delete_squashing_migrations_keep(self):
+        class Person(models.Model):
+            name = models.CharField(max_length=10)
+            dob = models.DateField()
+
+            class Meta:
+                app_label = "app"
+
+        out = io.StringIO()
+        patch_app_migrations = self.temporary_migration_module(
+            module="app.test_delete_replaced_migrations_keep", app_label="app"
+        )
+        with patch_app_migrations as migration_app_dir:
+            original_app_squash = load_migration_module(
+                os.path.join(migration_app_dir, "0004_squashed.py")
+            )
+            self.assertEqual(
+                original_app_squash.Migration.replaces,
+                [
+                    ("app", "0001_initial"),
+                    ("app", "0002_person_age"),
+                    ("app", "0003_add_dob"),
+                ],
+            )
+
+            call_command("squash_migrations", verbosity=1, stdout=out, no_color=True, keep=True)
+
+            files_in_app = sorted(
+                file for file in os.listdir(migration_app_dir) if file.endswith(".py")
+            )
+            old_app_squash = load_migration_module(
+                os.path.join(migration_app_dir, "0004_squashed.py")
+            )
+            new_app_squash = load_migration_module(
+                os.path.join(migration_app_dir, "0006_squashed.py")
+            )
+
+            with open(os.path.join(migration_app_dir, "0006_squashed.py"), "r") as new_migration_file:
+                new_migration_string = new_migration_file.read()
+
+            # Assert that only the "optimized" version is part of the new migration
+            self.assertNotIn("create_admin_MUST_ALWAYS_EXIST_original", new_migration_string)
+            self.assertIn("create_admin_MUST_ALWAYS_EXIST_optimized", new_migration_string)
+
+        # We altered an existing file, and removed all the "replaces" items
+        self.assertEqual(old_app_squash.Migration.replaces, [])
+        self.assertEqual(old_app_squash.Migration.dependencies, [("app", "0003_add_dob")])
+        # The new squashed migration replaced the old one now
+        self.assertEqual(
+            new_app_squash.Migration.replaces,
+            [
+                ("app", "0001_initial"),
+                ("app", "0002_person_age"),
+                ("app", "0003_add_dob"),
+                ("app", "0004_squashed"),
+                ("app", "0005_do_more_stuff"),
+            ],
+        )
+        self.assertEqual(
+            files_in_app,
+            [
+                "0001_initial.py",
+                "0002_person_age.py",
+                "0003_add_dob.py",
+                "0004_squashed.py",
+                "0005_do_more_stuff.py",
+                "0006_squashed.py",
+                "__init__.py",
+            ],
+        )
 
     def test_empty_models_migrations(self):
         """

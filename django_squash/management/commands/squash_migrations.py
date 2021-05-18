@@ -51,12 +51,17 @@ class Command(BaseCommand):
             help='Sets the name of the new squashed migration. Also accepted are the standard datetime parse '
                  'variables such as "%%Y%%m%%d". (default: "%(default)s" -> "xxxx_%(default)s")',
         )
+        parser.add_argument(
+            '--keep', action='store_true', help="Keep all of the old migrations instead of removing them. "
+                                                "Replaces the existing squashed migrations with stubs."
+        )
 
     @no_translations
     def handle(self, **kwargs):
         self.verbosity = 1
         self.include_header = False
         self.dry_run = kwargs['dry_run']
+        self.keep_migrations = kwargs['keep']
 
         ignore_apps = []
         bad_apps = []
@@ -103,7 +108,8 @@ class Command(BaseCommand):
             real_loader=loader,
             squash_loader=squash_loader,
             ignore_apps=ignore_apps,
-            migration_name=kwargs['squashed_name']
+            migration_name=kwargs['squashed_name'],
+            keep_migrations=self.keep_migrations
         )
 
         replacing_migrations = 0
